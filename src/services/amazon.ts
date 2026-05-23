@@ -6,6 +6,31 @@ const AMAZON_TIMEOUT_MS = parseInt(process.env.AMAZON_TIMEOUT_MS || '6000', 10);
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+// Words that indicate the result is NOT the actual product (case/accessory/knockoff)
+const COMPATIBILITY_PATTERN = /\b(compatible|case for|cover for|skin for|sleeve for|replacement|fits|adapter for|protector for|stand for|holder for|charger for|cable for|sticker)\b/i;
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'a', 'an', 'of', 'in', 'on', 'to', 'is',
+  'inch', 'inches', 'cm', 'mm', 'gen', 'series', 'edition', 'new', 'india', 'compatible',
+]);
+
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOPWORDS.has(w))
+  );
+}
+
+function tokenOverlap(queryTokens: Set<string>, title: string): number {
+  if (queryTokens.size === 0) return 0;
+  const titleTokens = tokenize(title);
+  let hits = 0;
+  for (const t of queryTokens) if (titleTokens.has(t)) hits++;
+  return hits / queryTokens.size; // [0, 1]
+}
+
 export async function scrapeAmazon(query: string): Promise<PriceResult | null> {
   const url = `https://www.amazon.in/s?k=${encodeURIComponent(query)}`;
   const controller = new AbortController();
@@ -28,7 +53,7 @@ export async function scrapeAmazon(query: string): Promise<PriceResult | null> {
       return null;
     }
     const html = await res.text();
-    const parsed = parseAmazonHtml(html);
+    const parsed = parseAmazonHtml(html, query);
     if (!parsed) {
       console.warn(`[amazon] parser returned null (html=${html.length}B; saw 's-search-result'? ${html.includes('s-search-result')})`);
     } else {
@@ -44,9 +69,19 @@ export async function scrapeAmazon(query: string): Promise<PriceResult | null> {
   }
 }
 
-export function parseAmazonHtml(html: string): PriceResult | null {
+export function parseAmazonHtml(html: string, query: string = ''): PriceResult | null {
   const $ = cheerio.load(html);
-  const candidates: Array<{ title: string; price_inr: number; url?: string; sponsored: boolean }> = [];
+  const queryTokens = tokenize(query);
+
+  interface Candidate {
+    title: string;
+    price_inr: number;
+    url?: string;
+    sponsored: boolean;
+    compatibilityNoise: boolean;
+    score: number;
+  }
+  const candidates: Candidate[] = [];
 
   $('div[data-component-type="s-search-result"]').each((_, el) => {
     const $el = $(el);
@@ -62,16 +97,33 @@ export function parseAmazonHtml(html: string): PriceResult | null {
     const asin = $el.attr('data-asin') || '';
     const url = asin ? `https://www.amazon.in/dp/${asin}` : undefined;
 
-    const sponsoredText = $el.text();
-    const sponsored = /Sponsored/i.test(sponsoredText) && !/result/i.test(sponsoredText.slice(0, 100));
+    const elText = $el.text();
+    const sponsored = /Sponsored/i.test(elText) && !/result/i.test(elText.slice(0, 100));
+    const compatibilityNoise = COMPATIBILITY_PATTERN.test(title);
+    const overlap = tokenOverlap(queryTokens, title);
 
-    candidates.push({ title, price_inr, url, sponsored });
+    // Score: higher = better match. Penalize sponsored + compatibility noise heavily.
+    let score = overlap;
+    if (sponsored) score *= 0.5;
+    if (compatibilityNoise) score *= 0.3;
+
+    candidates.push({ title, price_inr, url, sponsored, compatibilityNoise, score });
   });
 
   if (candidates.length === 0) return null;
 
-  // Prefer first non-sponsored, fall back to first
-  const best = candidates.find((c) => !c.sponsored) || candidates[0];
+  // Pick highest-scoring; require score >= 0.35 (i.e. ≥35% token overlap unless penalized down)
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+
+  if (best.score < 0.35) {
+    console.warn(`[amazon] best candidate has low score=${best.score.toFixed(2)} (title="${best.title.slice(0, 60)}") — rejecting`);
+    return null;
+  }
+
+  if (best.compatibilityNoise) {
+    console.warn(`[amazon] best candidate flagged as compatibility/accessory: "${best.title.slice(0, 60)}" (score=${best.score.toFixed(2)})`);
+  }
 
   return {
     source: 'Amazon',

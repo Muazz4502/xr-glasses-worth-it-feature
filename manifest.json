@@ -5,8 +5,8 @@
   "interface": "hybrid",
 
   "endpoints": {
-    "webhook": "https://b59b642b0da463.lhr.life/webhook",
-    "mcp":     "https://b59b642b0da463.lhr.life/mcp"
+    "webhook": "https://xr-glasses-worth-it-feature-production.up.railway.app/webhook",
+    "mcp":     "https://xr-glasses-worth-it-feature-production.up.railway.app/mcp"
   },
 
   "triggers": [
@@ -30,7 +30,7 @@
 
   "dataRetention": {
     "max_days": 90,
-    "deletion_webhook": "https://b59b642b0da463.lhr.life/delete-user"
+    "deletion_webhook": "https://xr-glasses-worth-it-feature-production.up.railway.app/delete-user"
   },
 
   "categories": ["shopping", "productivity", "lifestyle"],

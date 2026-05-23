@@ -5,10 +5,24 @@ const BRAIN_BASE_URL = process.env.BRAIN_BASE_URL || 'https://brain.endlessriver
 
 export interface ComparisonPushInput {
   userId: string;
-  amazon: PriceResult;
+  amazon: PriceResult;            // when amazonFailed=true, this is a clone of serpBest (builder convenience)
   serpBest: PriceResult;
-  deltaInr: number;
+  top3: PriceResult[];            // up to 3 cross-platform results
+  deltaInr: number;               // 0 when Amazon failed or no cheaper option
   productLabel: string;
+  speak: boolean;                 // true = play TTS; false = feed-only silent push
+  amazonFailed: boolean;
+}
+
+function formatInr(n: number): string {
+  return n.toLocaleString('en-IN');
+}
+
+function buildFeedStory(productLabel: string, top3: PriceResult[], amazon: PriceResult, amazonFailed: boolean): string {
+  const lines: string[] = [`${productLabel}:`];
+  if (!amazonFailed) lines.push(`Amazon ₹${formatInr(amazon.price_inr)}`);
+  top3.forEach((r) => lines.push(`${r.source}: ₹${formatInr(r.price_inr)}`));
+  return lines.join('\n');
 }
 
 export async function sendComparisonPush(input: ComparisonPushInput): Promise<boolean> {
@@ -19,40 +33,41 @@ export async function sendComparisonPush(input: ComparisonPushInput): Promise<bo
     return false;
   }
 
-  const { serpBest, deltaInr, productLabel } = input;
-  // Amazon-failed fallback path: deltaInr is 0 and "amazon" was a clone of serpBest.
-  const isFallback = deltaInr === 0;
-  const tts = isFallback
-    ? `Found ${productLabel} at ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
-    : `Actually, ₹${formatInr(serpBest.price_inr)} on ${serpBest.source} — ₹${formatInr(deltaInr)} cheaper.`;
-  const body = isFallback
-    ? `₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
-    : `₹${formatInr(serpBest.price_inr)} on ${serpBest.source} (₹${formatInr(deltaInr)} cheaper than Amazon).`;
-  const feedTitle = isFallback
-    ? `${productLabel} · ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}`
-    : `Cheaper found: ${serpBest.source} ₹${formatInr(serpBest.price_inr)}`;
-  const feedStory = isFallback
-    ? `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
-    : `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}, saving ₹${formatInr(deltaInr)} vs Amazon.`;
+  const { serpBest, deltaInr, productLabel, top3, speak, amazonFailed, amazon } = input;
+
+  // Body / TTS depend on which scenario this is.
+  let title: string;
+  let body: string;
+  let tts: string;
+  let feedTitle: string;
+
+  if (amazonFailed) {
+    title = 'Worth It';
+    body = `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`;
+    tts = `Found ${productLabel} at ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`;
+    feedTitle = `${productLabel} · ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}`;
+  } else if (deltaInr > 0) {
+    title = 'Worth It — cheaper found';
+    body = `₹${formatInr(serpBest.price_inr)} on ${serpBest.source} (₹${formatInr(deltaInr)} cheaper than Amazon).`;
+    tts = `Actually, ₹${formatInr(serpBest.price_inr)} on ${serpBest.source} — ₹${formatInr(deltaInr)} cheaper.`;
+    feedTitle = `Cheaper found: ${serpBest.source} ₹${formatInr(serpBest.price_inr)}`;
+  } else {
+    title = 'Worth It — cross-platform check';
+    body = `Amazon was already the best (₹${formatInr(amazon.price_inr)}).`;
+    tts = '';  // not spoken
+    feedTitle = `Cross-platform check · Amazon ₹${formatInr(amazon.price_inr)} best`;
+  }
+
+  const story = buildFeedStory(productLabel, top3, amazon, amazonFailed);
 
   const responses: SkillResponse[] = [
     {
       type: 'notification',
-      content: {
-        title: isFallback ? 'Worth It' : 'Worth It — cheaper found',
-        body,
-        tts,
-        speak: true,
-        persist: false,
-      },
+      content: { title, body, tts, speak, persist: false },
     },
     {
       type: 'feed_item',
-      content: {
-        feed_type: 'skill',
-        title: feedTitle,
-        story: feedStory,
-      },
+      content: { feed_type: 'skill', title: feedTitle, story },
     },
   ];
 
@@ -71,13 +86,10 @@ export async function sendComparisonPush(input: ComparisonPushInput): Promise<bo
       console.error(`[push] ${res.status}: ${text.slice(0, 200)}`);
       return false;
     }
+    console.log(`[push] delivered ok (speak=${speak}, top3=${top3.length})`);
     return true;
   } catch (err) {
     console.error('[push] failed', err);
     return false;
   }
-}
-
-function formatInr(n: number): string {
-  return n.toLocaleString('en-IN');
 }

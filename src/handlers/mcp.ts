@@ -186,11 +186,12 @@ export async function handleDialog(input: ToolInput): Promise<McpResult> {
   if (amazon) updateAmazon(comparisonId, amazon.price_inr, amazon.url || '');
   console.log(`[mcp] path: amazon=${amazon ? `₹${amazon.price_inr}` : 'NULL'} → ${amazon ? 'happy' : 'degraded (will push SerpAPI as fallback if found)'}`);
 
-  // 10. Background SerpAPI → maybe push
+  // 10. Background SerpAPI → ALWAYS push results when found (informational at minimum)
   void serpP
     .then(async (serpResults) => {
       const top3 = serpResults.slice(0, 3);
       const serpBest = serpResults[0] ?? null;
+      console.log(`[mcp] serp completed: ${serpResults.length} results${serpBest ? ` (best=₹${serpBest.price_inr} on ${serpBest.source})` : ''}`);
       updateSerp(
         comparisonId,
         serpBest ? { price_inr: serpBest.price_inr, source: serpBest.source, url: serpBest.url } : null,
@@ -198,40 +199,43 @@ export async function handleDialog(input: ToolInput): Promise<McpResult> {
         serpResults.length ? 'serp_completed' : 'no_price'
       );
       if (!serpBest) {
-        console.log(`[mcp] no SerpAPI result, nothing to push`);
+        console.log(`[mcp] no SerpAPI result, no push`);
         return;
       }
 
-      // Case A: Amazon FAILED (geo-blocked, timeout, etc.) — push SerpAPI as the primary price.
+      // Filter sanity floor (likely-wrong matches priced ≪ amazon)
+      const filteredTop3 = top3.filter((r) =>
+        !amazon || r.price_inr >= amazon.price_inr * PUSH_MIN_RATIO_VS_AMAZON
+      );
+
+      // Decide TTS-loud vs silent push.
+      // Loud (speak): Amazon failed OR a meaningfully cheaper non-Amazon option exists.
+      // Silent (no speak, feed only): SerpAPI completed but Amazon was already best — still surface results.
+      let speak = false;
+      let deltaInr = 0;
+
       if (!amazon) {
-        console.log(`[mcp] amazon-failed fallback: pushing SerpAPI ₹${serpBest.price_inr} on ${serpBest.source}`);
-        const ok = await sendComparisonPush({
-          userId: input.userId,
-          amazon: { source: serpBest.source, title: vision.name, price_inr: serpBest.price_inr, url: serpBest.url },  // fake amazon param for builder
-          serpBest,
-          deltaInr: 0,
-          productLabel: productLabel(vision),
-        });
-        if (ok) markPushSent(comparisonId);
-        return;
+        speak = true;  // Amazon failed; SerpAPI is the primary answer
+      } else {
+        const cheaperBest = filteredTop3.find((r) => !r.source.toLowerCase().includes('amazon'));
+        if (cheaperBest) {
+          deltaInr = amazon.price_inr - cheaperBest.price_inr;
+          const meaningfullyCheaper =
+            cheaperBest.price_inr < amazon.price_inr * (1 - PUSH_DELTA_PCT_MIN) || deltaInr >= PUSH_DELTA_INR_MIN;
+          if (meaningfullyCheaper) speak = true;
+        }
       }
 
-      // Case B: Amazon succeeded — only push if SerpAPI is meaningfully cheaper from a different retailer.
-      if (serpBest.source.toLowerCase().includes('amazon')) return;
-      if (serpBest.price_inr < amazon.price_inr * PUSH_MIN_RATIO_VS_AMAZON) {
-        console.log(`[mcp] suppressing push: serp ₹${serpBest.price_inr} is <${PUSH_MIN_RATIO_VS_AMAZON*100}% of Amazon ₹${amazon.price_inr} on ${serpBest.source}`);
-        return;
-      }
-      const delta = amazon.price_inr - serpBest.price_inr;
-      const meaningfullyCheaper =
-        serpBest.price_inr < amazon.price_inr * (1 - PUSH_DELTA_PCT_MIN) || delta >= PUSH_DELTA_INR_MIN;
-      if (!meaningfullyCheaper) return;
+      console.log(`[mcp] firing push: speak=${speak} delta=₹${deltaInr} top3=${filteredTop3.length}`);
       const ok = await sendComparisonPush({
         userId: input.userId,
-        amazon,
+        amazon: amazon || { source: serpBest.source, title: vision.name, price_inr: serpBest.price_inr, url: serpBest.url },
         serpBest,
-        deltaInr: delta,
+        top3: filteredTop3,
+        deltaInr,
         productLabel: productLabel(vision),
+        speak,
+        amazonFailed: !amazon,
       });
       if (ok) markPushSent(comparisonId);
     })
@@ -302,24 +306,42 @@ async function handleBarcodeFollowup(input: ToolInput): Promise<McpResult> {
     .then(async (serpResults) => {
       const top3 = serpResults.slice(0, 3);
       const serpBest = serpResults[0] ?? null;
+      console.log(`[mcp:barcode] serp completed: ${serpResults.length} results${serpBest ? ` (best=₹${serpBest.price_inr} on ${serpBest.source})` : ''}`);
       updateSerp(
         comparisonId,
         serpBest ? { price_inr: serpBest.price_inr, source: serpBest.source, url: serpBest.url } : null,
         top3,
         serpResults.length ? 'serp_completed' : 'no_price'
       );
-      if (!serpBest || !amazon) return;
-      if (serpBest.source.toLowerCase().includes('amazon')) return;
-      const delta = amazon.price_inr - serpBest.price_inr;
-      const meaningfullyCheaper =
-        serpBest.price_inr < amazon.price_inr * (1 - PUSH_DELTA_PCT_MIN) || delta >= PUSH_DELTA_INR_MIN;
-      if (!meaningfullyCheaper) return;
+      if (!serpBest) return;
+
+      const filteredTop3 = top3.filter((r) =>
+        !amazon || r.price_inr >= amazon.price_inr * PUSH_MIN_RATIO_VS_AMAZON
+      );
+
+      let speak = false;
+      let deltaInr = 0;
+      if (!amazon) {
+        speak = true;
+      } else {
+        const cheaperBest = filteredTop3.find((r) => !r.source.toLowerCase().includes('amazon'));
+        if (cheaperBest) {
+          deltaInr = amazon.price_inr - cheaperBest.price_inr;
+          const meaningfullyCheaper =
+            cheaperBest.price_inr < amazon.price_inr * (1 - PUSH_DELTA_PCT_MIN) || deltaInr >= PUSH_DELTA_INR_MIN;
+          if (meaningfullyCheaper) speak = true;
+        }
+      }
+
       const ok = await sendComparisonPush({
         userId: input.userId,
-        amazon,
+        amazon: amazon || { source: serpBest.source, title: vision.name, price_inr: serpBest.price_inr, url: serpBest.url },
         serpBest,
-        deltaInr: delta,
+        top3: filteredTop3,
+        deltaInr,
         productLabel: productLabel(vision),
+        speak,
+        amazonFailed: !amazon,
       });
       if (ok) markPushSent(comparisonId);
     })
