@@ -1,67 +1,34 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
 import { verifyTraceSignature } from './hmac';
+import { v4 as uuid } from 'uuid';
+import { handleDialog } from './handlers/mcp';
+import { deleteUserData, cacheRecentPhoto } from './services/db';
+import { ToolInput } from './types/trace';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3001', 10);
 const TRACE_HMAC_SECRET = process.env.TRACE_HMAC_SECRET || '';
-const TRACE_SKILL_ID = process.env.TRACE_SKILL_ID || '';
-const BRAIN_BASE_URL = process.env.BRAIN_BASE_URL || 'https://brain.endlessriver.ai';
 
-// Capture rawBody BEFORE JSON parsing — required for HMAC verification.
+// Capture rawBody for HMAC verification on /webhook
 app.use(
   express.json({
-    verify: (req: any, _res, buf) => { req.rawBody = buf; },
+    limit: '5mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
   })
 );
 
-// ─── 🟢 Webhook Endpoint ──────────────────────────────────────────────────────
-// media.photo, media.audio, media.video events arrive here.
-// Always: return 202 immediately, then process asynchronously and POST to callback_url.
-app.post('/webhook', verifyTraceSignature(TRACE_HMAC_SECRET), async (req: Request, res: Response) => {
-  const { event, user, request_id, callback_url } = req.body;
-  console.log(`[Webhook] Received ${event.channel} for user ${user.id}`);
-
-  // Acknowledge immediately — never keep the platform waiting.
-  res.status(202).json({ status: 'accepted' });
-
-  // Process asynchronously, then call back with results.
-  processEvent({ event, user, requestId: request_id, callbackUrl: callback_url })
-    .catch((err) => console.error('[Webhook] processing error:', err));
-});
-
-async function processEvent(opts: {
-  event: any;
-  user: any;
-  requestId: string;
-  callbackUrl: string;
-}) {
-  const { event, user, requestId, callbackUrl } = opts;
-
-  // TODO: add your processing logic here (vision, audio, etc.)
-  // Then POST the results to callbackUrl.
-
-  const responses = [
-    {
-      type: 'notification',
-      content: {
-        title: 'Template Skill',
-        body: `Processed your ${event.channel} event.`,
-      },
-    },
-  ];
-
-  await postCallback(callbackUrl, requestId, responses);
-}
-
-// ─── 🔵 MCP (JSON-RPC) Endpoint ──────────────────────────────────────────────
-// Used for dialog turns (voice queries).
+// ─── MCP — JSON-RPC 2.0 ──────────────────────────────────────────────────────
+// Per spec, /mcp is NOT HMAC-signed by the platform.
 app.post('/mcp', async (req: Request, res: Response) => {
-  const { jsonrpc, method, params, id } = req.body;
-  if (jsonrpc !== '2.0') return res.status(400).send('Invalid JSON-RPC');
+  const { jsonrpc, method, params, id } = req.body || {};
+  if (jsonrpc !== '2.0') {
+    return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  }
 
   if (method === 'tools/list') {
     return res.json({
@@ -71,93 +38,103 @@ app.post('/mcp', async (req: Request, res: Response) => {
         tools: [
           {
             name: 'handle_dialog',
-            description: 'My main dialog tool.',
+            description:
+              "Handle 'is this worth it?' voice + image. Identifies the product, returns the cheapest Indian online price.",
             inputSchema: {
               type: 'object',
               properties: {
-                utterance: { type: 'string' }
-              }
-            }
-          }
-        ]
-      }
+                utterance: { type: 'string' },
+                userId: { type: 'string' },
+                items: { type: 'array' },
+                context: { type: 'object' },
+                user: { type: 'object' },
+                pending_context: { type: 'object' },
+              },
+              required: ['userId', 'user'],
+            },
+          },
+        ],
+      },
     });
   }
 
   if (method === 'tools/call') {
-    const { name, arguments: args } = params;
-    if (name === 'handle_dialog') {
-      return res.json({
+    const t0 = Date.now();
+    const toolName = params?.name;
+    if (toolName !== 'handle_dialog') {
+      return res.status(404).json({
         jsonrpc: '2.0',
         id,
-        result: {
-          content: [
-            { type: 'text', text: `You said: ${args.utterance}` },
-            {
-              type: 'embedded_responses',
-              responses: [
-                { type: 'feed_item', content: { title: 'Dialog Handled', story: args.utterance } }
-              ]
-            }
-          ]
-        }
+        error: { code: -32601, message: `Unknown tool: ${toolName}` },
+      });
+    }
+    try {
+      const args = (params?.arguments || {}) as ToolInput;
+      const result = await handleDialog(args);
+      const dur = Date.now() - t0;
+      console.log(`[mcp] handle_dialog ${dur}ms | userId=${args.userId} | state=${result.state || 'completed'}`);
+      return res.json({ jsonrpc: '2.0', id, result });
+    } catch (err) {
+      console.error('[mcp] handle_dialog error', err);
+      return res.status(500).json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32000, message: 'Internal error' },
       });
     }
   }
 
-  res.status(404).json({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
+  return res.status(404).json({
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32601, message: `Method not found: ${method}` },
+  });
 });
 
-// ─── Callback helper ─────────────────────────────────────────────────────────
-// Sign and POST the skill's response back to the platform after async processing.
+// ─── Webhook (signed) ────────────────────────────────────────────────────────
+// Per spec: /webhook IS signed. Handles passive media.photo + user.deleted events.
+app.post('/webhook', verifyTraceSignature(TRACE_HMAC_SECRET), async (req: Request, res: Response) => {
+  // Acknowledge immediately — never keep the platform waiting.
+  res.status(202).json({ status: 'accepted' });
 
-async function postCallback(callbackUrl: string, requestId: string, responses: any[]) {
-  const body      = JSON.stringify({ request_id: requestId, status: 'success', responses });
-  const timestamp = Date.now().toString();
-  const signature = 'sha256=' + crypto
-    .createHmac('sha256', TRACE_HMAC_SECRET)
-    .update(`${timestamp}.${body}`)
-    .digest('hex');
+  const { event, user } = req.body || {};
+  const userId = user?.id;
 
-  const res = await fetch(callbackUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Trace-Timestamp': timestamp,
-      'X-Trace-Signature': signature,
-    },
-    body,
-  });
-  console.log(`[Callback] → ${res.status}`);
-}
+  console.log(`[webhook] channel=${event?.channel} user=${userId}`);
 
-// ─── 🟣 Proactive Push API Helper ───────────────────────────────────────────
-// Use this to send responses on your own schedule (cron, job queue, etc.)
-// without a triggering event from the platform.
-
-async function sendPushResponse(user_id: string, responses: any[]) {
-  const url = `${BRAIN_BASE_URL}/api/skill-push/${TRACE_SKILL_ID}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${TRACE_HMAC_SECRET}`,
-    },
-    body: JSON.stringify({ user_id, responses }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`[Push] ${res.status} ${text}`);
+  if (event?.channel === 'media.photo' && userId) {
+    // Cache the photo for proximity linking to the next voice query within 5 min.
+    const item = (event.items || []).find((i: any) => i.url);
+    if (item?.url) {
+      const photoId = item.id || uuid();
+      cacheRecentPhoto(photoId, userId, item.url);
+      console.log(`[webhook] cached media.photo ${photoId} for user ${userId}`);
+    }
+    return;
   }
-}
 
-// ─── Lifecycle / Deletion ────────────────────────────────────────────────────
-app.post('/delete-user', (req: Request, res: Response) => {
-  const { user_id } = req.body;
-  console.log(`[Cleanup] Deleting data for user ${user_id}`);
-  res.json({ ok: true });
+  if (event?.channel === 'user.deleted' && userId) {
+    const counts = deleteUserData(userId);
+    console.log(`[webhook] deleted user ${userId}: ${JSON.stringify(counts)}`);
+    return;
+  }
+});
+
+// Dedicated user-deletion endpoint declared in manifest.dataRetention.deletion_webhook
+app.post('/delete-user', verifyTraceSignature(TRACE_HMAC_SECRET), (req: Request, res: Response) => {
+  const userId = req.body?.user_id;
+  if (!userId) return res.status(400).json({ error: 'user_id required' });
+  const counts = deleteUserData(userId);
+  console.log(`[delete-user] ${userId}: ${JSON.stringify(counts)}`);
+  return res.json({ ok: true, deleted: counts });
+});
+
+// Health
+app.get('/', (_req: Request, res: Response) => {
+  res.json({ skill: 'Worth It', version: '1.0.0', status: 'ok' });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Skill template running at http://localhost:${PORT}`);
+  const haveKeys = !!process.env.OPENAI_API_KEY && !!process.env.SERPAPI_KEY;
+  console.log(`🛒 Worth It skill on http://localhost:${PORT} | keys=${haveKeys ? 'set' : 'MISSING'}`);
 });

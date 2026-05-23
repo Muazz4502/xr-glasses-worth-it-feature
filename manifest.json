@@ -1,29 +1,42 @@
 {
-  "name": "Template Skill",
+  "name": "Worth It",
+  "description": "Look at any product, ask 'is this worth it?', and hear the cheapest online price across Amazon, Flipkart, and Meesho. Saves to your Watchlist and emails the buy link.",
   "version": "1.0.0",
   "interface": "hybrid",
+
   "endpoints": {
-    "webhook": "https://your-domain.ngrok-free.app/webhook",
-    "mcp": "https://your-domain.ngrok-free.app/mcp"
+    "webhook": "https://b59b642b0da463.lhr.life/webhook",
+    "mcp":     "https://b59b642b0da463.lhr.life/mcp"
   },
+
   "triggers": [
+    { "channel": "instant.image",   "routing_mode": "active",  "filter": { "hasImage": true } },
     { "channel": "instant.message", "routing_mode": "active" },
-    { "channel": "instant.image",      "routing_mode": "active" },
-    { "channel": "media.photo",        "routing_mode": "passive" }
+    { "channel": "media.photo",     "routing_mode": "passive" }
   ],
+
   "domains": {
-    "general": "Handle general greetings and tests for the template skill. Match utterances like 'test template' or 'hello from template'."
+    "price_compare": "Handle voice + image requests to compare a product's price across online retailers. Match utterances like 'is this worth it', 'what's the cheapest', 'compare this price', 'is this cheaper online', 'check the price', 'find this online', 'how much is this', 'price check', 'worth it'. The skill identifies the product from the image and returns the cheapest Indian online price across Amazon, Flipkart, and other major retailers."
   },
+
+  "execution": { "mode": "sync" },
+
   "permissions": [
-    "notification.send",
     "user.profile.read",
     "user.location.read"
   ],
-  "allowedTools": [
-    "mail.send"
-  ],
-  "data_retention": {
-    "max_days": 30,
-    "deletion_webhook": "https://your-domain.ngrok-free.app/delete-user"
-  }
+
+  "allowedTools": ["mail.send"],
+
+  "dataRetention": {
+    "max_days": 90,
+    "deletion_webhook": "https://b59b642b0da463.lhr.life/delete-user"
+  },
+
+  "categories": ["shopping", "productivity", "lifestyle"],
+
+  "isPrivate": false,
+
+  "proactive": true,
+  "proactiveReason": "After answering 'cheapest price' with the fast Amazon-direct lookup, the skill continues a parallel cross-platform search (SerpAPI Google Shopping). When a meaningfully cheaper price is found on another retailer (>=3% or >=Rs.50 savings), the skill delivers a single proactive notification with the cheaper option. The push fires only on a real savings event; never for marketing or general engagement."
 }

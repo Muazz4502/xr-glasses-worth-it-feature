@@ -1,7 +1,7 @@
 {
-  "name": "trace-template-skill",
+  "name": "worth-it-skill",
   "version": "1.0.0",
-  "description": "A minimal Trace Skill template for buildathons.",
+  "description": "Worth It — Trace Smart Glasses skill for price comparison.",
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",
@@ -9,15 +9,23 @@
     "build": "tsc"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "dotenv": "^16.0.3",
+    "better-sqlite3": "^11.7.0",
     "body-parser": "^1.20.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "lru-cache": "^11.0.2",
     "node-fetch": "^2.6.9",
+    "openai": "^4.78.1",
+    "pino": "^9.5.0",
+    "sharp": "^0.33.5",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^4.17.17",
     "@types/node": "^18.15.5",
+    "@types/node-fetch": "^2.6.12",
     "@types/uuid": "^9.0.1",
     "nodemon": "^2.0.22",
     "ts-node": "^10.9.1",
