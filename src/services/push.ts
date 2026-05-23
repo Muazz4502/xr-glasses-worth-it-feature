@@ -20,13 +20,27 @@ export async function sendComparisonPush(input: ComparisonPushInput): Promise<bo
   }
 
   const { serpBest, deltaInr, productLabel } = input;
-  const tts = `Actually, ₹${formatInr(serpBest.price_inr)} on ${serpBest.source} — ₹${formatInr(deltaInr)} cheaper.`;
+  // Amazon-failed fallback path: deltaInr is 0 and "amazon" was a clone of serpBest.
+  const isFallback = deltaInr === 0;
+  const tts = isFallback
+    ? `Found ${productLabel} at ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
+    : `Actually, ₹${formatInr(serpBest.price_inr)} on ${serpBest.source} — ₹${formatInr(deltaInr)} cheaper.`;
+  const body = isFallback
+    ? `₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
+    : `₹${formatInr(serpBest.price_inr)} on ${serpBest.source} (₹${formatInr(deltaInr)} cheaper than Amazon).`;
+  const feedTitle = isFallback
+    ? `${productLabel} · ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}`
+    : `Cheaper found: ${serpBest.source} ₹${formatInr(serpBest.price_inr)}`;
+  const feedStory = isFallback
+    ? `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}.`
+    : `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}, saving ₹${formatInr(deltaInr)} vs Amazon.`;
+
   const responses: SkillResponse[] = [
     {
       type: 'notification',
       content: {
-        title: 'Worth It — cheaper found',
-        body: `₹${formatInr(serpBest.price_inr)} on ${serpBest.source} (₹${formatInr(deltaInr)} cheaper than Amazon).`,
+        title: isFallback ? 'Worth It' : 'Worth It — cheaper found',
+        body,
         tts,
         speak: true,
         persist: false,
@@ -36,8 +50,8 @@ export async function sendComparisonPush(input: ComparisonPushInput): Promise<bo
       type: 'feed_item',
       content: {
         feed_type: 'skill',
-        title: `Cheaper found: ${serpBest.source} ₹${formatInr(serpBest.price_inr)}`,
-        story: `${productLabel}: ₹${formatInr(serpBest.price_inr)} on ${serpBest.source}, saving ₹${formatInr(deltaInr)} vs Amazon.`,
+        title: feedTitle,
+        story: feedStory,
       },
     },
   ];

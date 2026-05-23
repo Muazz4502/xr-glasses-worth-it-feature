@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
 import { PriceResult } from '../types/trace';
 
-const AMAZON_TIMEOUT_MS = parseInt(process.env.AMAZON_TIMEOUT_MS || '2500', 10);
+const AMAZON_TIMEOUT_MS = parseInt(process.env.AMAZON_TIMEOUT_MS || '6000', 10);
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -10,6 +10,7 @@ export async function scrapeAmazon(query: string): Promise<PriceResult | null> {
   const url = `https://www.amazon.in/s?k=${encodeURIComponent(query)}`;
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), AMAZON_TIMEOUT_MS);
+  const t0 = Date.now();
   try {
     const res = await fetch(url, {
       signal: controller.signal as any,
@@ -20,10 +21,23 @@ export async function scrapeAmazon(query: string): Promise<PriceResult | null> {
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       },
     });
-    if (!res.ok) return null;
+    const dur = Date.now() - t0;
+    console.log(`[amazon] HTTP ${res.status} in ${dur}ms for "${query.slice(0, 40)}"`);
+    if (!res.ok) {
+      console.warn(`[amazon] non-200 status, returning null`);
+      return null;
+    }
     const html = await res.text();
-    return parseAmazonHtml(html);
-  } catch {
+    const parsed = parseAmazonHtml(html);
+    if (!parsed) {
+      console.warn(`[amazon] parser returned null (html=${html.length}B; saw 's-search-result'? ${html.includes('s-search-result')})`);
+    } else {
+      console.log(`[amazon] parsed → ₹${parsed.price_inr} :: ${parsed.title.slice(0, 60)}`);
+    }
+    return parsed;
+  } catch (err: any) {
+    const dur = Date.now() - t0;
+    console.warn(`[amazon] failed after ${dur}ms: ${err?.message || err?.name || err}`);
     return null;
   } finally {
     clearTimeout(t);
@@ -41,7 +55,6 @@ export function parseAmazonHtml(html: string): PriceResult | null {
     if (!title) return;
 
     const priceWhole = $el.find('span.a-price-whole').first().text().replace(/[^\d]/g, '');
-    const priceFrac = $el.find('span.a-price-fraction').first().text().replace(/[^\d]/g, '');
     if (!priceWhole) return;
     const price_inr = parseInt(priceWhole, 10);
     if (!Number.isFinite(price_inr) || price_inr < 10) return;

@@ -184,6 +184,7 @@ export async function handleDialog(input: ToolInput): Promise<McpResult> {
   // 9. Wait for Amazon
   const amazon = await amazonP;
   if (amazon) updateAmazon(comparisonId, amazon.price_inr, amazon.url || '');
+  console.log(`[mcp] path: amazon=${amazon ? `₹${amazon.price_inr}` : 'NULL'} → ${amazon ? 'happy' : 'degraded (will push SerpAPI as fallback if found)'}`);
 
   // 10. Background SerpAPI → maybe push
   void serpP
@@ -196,11 +197,27 @@ export async function handleDialog(input: ToolInput): Promise<McpResult> {
         top3,
         serpResults.length ? 'serp_completed' : 'no_price'
       );
-      if (!serpBest || !amazon) return;
-      // Same retailer → silent
+      if (!serpBest) {
+        console.log(`[mcp] no SerpAPI result, nothing to push`);
+        return;
+      }
+
+      // Case A: Amazon FAILED (geo-blocked, timeout, etc.) — push SerpAPI as the primary price.
+      if (!amazon) {
+        console.log(`[mcp] amazon-failed fallback: pushing SerpAPI ₹${serpBest.price_inr} on ${serpBest.source}`);
+        const ok = await sendComparisonPush({
+          userId: input.userId,
+          amazon: { source: serpBest.source, title: vision.name, price_inr: serpBest.price_inr, url: serpBest.url },  // fake amazon param for builder
+          serpBest,
+          deltaInr: 0,
+          productLabel: productLabel(vision),
+        });
+        if (ok) markPushSent(comparisonId);
+        return;
+      }
+
+      // Case B: Amazon succeeded — only push if SerpAPI is meaningfully cheaper from a different retailer.
       if (serpBest.source.toLowerCase().includes('amazon')) return;
-      // Sanity floor: SerpAPI result priced far below Amazon is almost certainly
-      // a different product (refurb, accessory, knockoff). Suppress.
       if (serpBest.price_inr < amazon.price_inr * PUSH_MIN_RATIO_VS_AMAZON) {
         console.log(`[mcp] suppressing push: serp ₹${serpBest.price_inr} is <${PUSH_MIN_RATIO_VS_AMAZON*100}% of Amazon ₹${amazon.price_inr} on ${serpBest.source}`);
         return;
